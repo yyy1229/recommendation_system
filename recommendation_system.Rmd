@@ -1,0 +1,503 @@
+---
+title: "Developing and Testing Movie Recommendation Algorithm"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: 
+      collapsed: true
+      smooth_scroll: true
+date: today
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE)
+library(tidyverse)
+library(dslabs)
+library(gridExtra)
+library(ggthemes)
+library(caret) 
+library(matrixStats) 
+library(data.table)
+library(recommenderlab)
+
+ds_theme_set()
+options(digits = 3)
+knitr::opts_chunk$set(
+  comment = "#>",
+  collapse = TRUE,
+  cache = TRUE,
+  out.width = "70%",
+  fig.align = "center",
+  fig.width = 6,
+  fig.asp = 0.618,  # 1 / phi
+  fig.show = "hold"
+)
+
+```
+
+In this project, we will first train machine learning models to predict the digits from the MNIST handwritten digits, and to predict movie ratings from the MovieLens dataset. 
+
+## Part 1: MNIST Digits
+
+1. Load in the training dataset from [here](https://github.com/datasciencelabs/2022/blob/master/data/digits_st.RDS), which can be accessed as `digits_st$train`.
+```{r}
+# your code here
+library(tidyverse) 
+library(randomForest)
+library(dslabs) 
+# githubURL <-"https://github.com/datasciencelabs/2022/blob/master/data/digits_st.RDS"
+# download.file(githubURL,"digits_st.RDS")
+#mnist <-readRDS("digits_st.RDS")
+digits_st <- readRDS(url("https://github.com/datasciencelabs/2022/raw/master/data/digits_st.RDS"))
+names(digits_st$train)
+dim(digits_st$train$images) 
+
+```
+
+2. Data processing, including removing noninformative features.
+
+```{r}
+x <- digits_st$train$images
+
+y <- factor(digits_st$train$labels)
+
+
+nzv <- nearZeroVar(x) 
+length(nzv)
+image(matrix(1:784 %in% nzv, 28, 28)) 
+col_index <- setdiff(1:ncol(x), nzv) 
+length(col_index) 
+
+colnames(x) <- 1:ncol(digits_st$train$images) 
+
+x_sub<-x[ ,col_index]
+dim(x_sub)
+```
+
+3. Train and validate machine learning models: 
+
+#### KNN  
+
+we have run KNN with 10 fold cross-validation for k =1,4,7,10 fist, then use a finier grid to get the finial k.
+
+```{r, eval=F,echo=T}
+# your code here
+library(doParallel)
+
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoParallel(cl)
+#k-nearest neighbor
+control <- trainControl(method = "cv", number = 10, p = .9) 
+train_knn <- train(x_sub, y,  
+                   method = "knn",  
+                   tuneGrid = data.frame(k =seq(1,10,3)), 
+                   trControl = control) 
+train_knn
+#save results 
+saveRDS(train_knn, "train_knn.rds")
+p=ggplot(train_knn, highlight = TRUE)
+png("train_knn.png")
+print(p)
+dev.off()
+
+#here we found k=1 and 4 has the highest accuracy, rerun using finer grid.
+train_knn2 <- train(x_sub, y,  
+                   method = "knn",  
+                   tuneGrid = data.frame(k =seq(1,4)), 
+                   trControl = control) 
+train_knn2
+saveRDS(train_knn2, "train_knn2.rds")
+p2=ggplot(train_knn2, highlight = TRUE)
+png("train_knn2.png")
+print(p)
+dev.off()
+stopCluster(cl)
+
+```
+
+```{r echo=F}
+train_knn <- readRDS("train_knn.rds")
+train_knn2<-readRDS("train_knn2.rds")
+train_rf <- readRDS("train_rf.rds")
+```
+
+```{r}
+ggplot(train_knn, highlight = TRUE)
+ggplot(train_knn2, highlight = TRUE)
+train_knn2$bestTune 
+train_knn2$results
+
+# 
+# train_knn2$results |>
+#   ggplot(aes(x = k, y = Accuracy)) +
+#   geom_line() +
+#   geom_point() +
+#   geom_errorbar(aes(x = k,
+#                     ymin = Accuracy - AccuracySD,
+#                     ymax = Accuracy + AccuracySD))
+```
+
+With the results above, we would choose k=3
+
+#### random forest   
+
+we have run random forest with 10 fold cross-validation. 
+```{r  Random forest, eval=F,echo=T}
+library(randomForest) 
+registerDoParallel(cl)
+control <- trainControl(method = "cv", number = 10, p = .9) 
+
+grid <- data.frame(mtry = c(1, 5, 10, 25, 50, 100)) 
+train_rf <-  train(x_sub, y,  
+                   method = "rf",  
+                   ntree = 15, 
+                   trControl = control, 
+                   tuneGrid = grid, 
+                   nSamp = 10000) 
+train_rf
+saveRDS(train_rf, "train_rf.rds")
+p=ggplot(train_rf, highlight = TRUE)
+png("train_rf.png")
+print(p)
+dev.off()
+
+
+```
+
+```{r}
+ggplot(train_rf, highlight = TRUE)
+train_rf$bestTune
+train_rf$results
+
+```
+
+#### compare KNN vs. random forest   
+
+as the KNN and random forest model has similar overall accuracy, here we would like to see whether emsemble method can improve the model performance. Here, we split the data into 2 sets to avoid overfitting
+```{r eval=FALSE,echo=TRUE}
+train_index <- createDataPartition(digits_st$train$labels, times = 1, p = 0.8, list = FALSE)
+train_x <- x_sub[train_index, ]
+train_y <- y[train_index]
+test_x <- x_sub[-train_index, ]
+test_y <- y[-train_index]
+fit_knn <- knn3(train_x, train_y,  k = train_knn2$bestTune$k) 
+y_pred_knn <- predict(fit_knn, test_x, type = "class")
+con1=confusionMatrix(y_pred_knn, test_y)
+saveRDS(con1, "con1.rds")
+
+fit_rf <- randomForest(train_x, train_y,  
+                       mtry = train_rf$bestTune$mtry,
+                       minNode = 10) 
+
+y_pred_rf <- predict(fit_rf, test_x, type = "class")
+con2=confusionMatrix(y_pred_rf, test_y)
+saveRDS(con2, "con2.rds")
+```
+
+```{r echo=FALSE}
+readRDS("con1.rds")
+readRDS("con2.rds")
+
+```
+#### fit in the entire dataset  
+
+```{r eval=FALSE}
+fit_knn_wh <- knn3(x_sub, y,  k = train_knn2$bestTune$k) 
+fit_rf_wh <- randomForest(x_sub, y,  
+                       mtry = train_rf$bestTune$mtry,
+                       minNode = 10) 
+```
+
+
+4. Model performance
+
+Here we have uused KNN and random forest to build the models and optimized the parameters using 10-fold cross-validation. For KNN, we found the best K is 3 and the  maximize accuracy is 0.97. For random foresst, we found the best mtry is 50 and the maximize accuracy is 0.95.
+as the KNN and random forest model has similar overall accuracy,  we further investigated their performance in each category and examine whether emsemble method can improve the model performance. To do that, I splitted the data into a training and validation set to avoid overfiiting. After evaluating the fitted model in the testing seet, we found the KNN model had relatively lower  sensitivity and specificity for class 8, whereas the random forest have realtively lower sensitivity and specificity for class 4 and 9. Therefore, we do think an ensemble between them might help further increase the performance and that is what we would use as the final algorithm 
+
+
+
+5. Apply the final model to produce digit predictions on the test data
+
+```{r eval=FALSE}
+x_test <- digits_st$test$images
+
+p_rf <- predict(fit_rf_wh, x_test[,col_index], type = "prob")   #Prediction from the random forest model
+p_rf <- p_rf / rowSums(p_rf) 
+p_knn  <- predict(fit_knn_wh, x_test[,col_index])  #Prediction from Knn
+p <- (p_rf + p_knn)/2 
+digit_predictions <- factor(apply(p, 1, which.max)-1) 
+
+
+saveRDS(digit_predictions, file = "digit_predictions.RDS")
+```
+
+## Part 2: MovieLens Data
+
+1. Load in the training dataset from [here](https://github.com/datasciencelabs/2022/blob/master/data/mv_st.RDS), which can be accessed as `mv_st$train`.
+
+```{r}
+# your code here
+mv_st <- readRDS(url("https://github.com/datasciencelabs/2022/raw/master/data/mv_st.RDS"))
+```
+
+2. Preprocess the data in any way you find appropriate. This could include removing noninformative features.
+
+```{r}
+mv_train<-as.data.frame(mv_st$train)
+as.tibble(mv_train)
+mv_test<-as.data.frame(mv_st$test)
+as.tibble(mv_test)
+mv_train |>
+  summarize(n_users = n_distinct(userId),
+            n_movies = n_distinct(movieId),
+            n_genres=n_distinct(genres))
+
+
+mv_test |>
+  summarize(n_users = n_distinct(userId),
+            n_movies = n_distinct(movieId),
+            n_genres=n_distinct(genres))
+#check whether the userid ,hgenres, movieid in test set are in training set
+mv_test|>
+  anti_join(mv_train, by = "movieId") 
+mv_test|>  
+  anti_join(mv_train, by = "userId")
+mv_test|>  
+  anti_join(mv_train, by = "genres")
+
+
+```
+
+We would like to contruct a rating matrix with movie id, userid, and rating
+
+```{r}
+mat <- select(mv_train, movieId, userId, rating) |>
+  pivot_wider(names_from = movieId, values_from = rating)
+rnames <- mat$userId
+mat <- as.matrix(mat[,-1])
+rownames(mat) <- rnames
+dim(mat)
+movie_map <- mv_train |> select(movieId, title) |>
+  distinct(movieId, .keep_all = TRUE)
+
+
+```
+
+I would like to the Recommenderlab to build the prediction. So, I would convert the matrix into a realRatingMatrix data structure
+
+```{r}
+movie_r <- as(mat, "realRatingMatrix")
+summary(getRatings(movie_r))
+#check rating distribution
+data.frame(ratings = getRatings(movie_r)) %>%
+  ggplot(aes(ratings)) + geom_bar(width = 0.75) +
+    labs(title = 'Movielense Ratings Distribution')
+
+#check distributions of the number of reviews given by each user.
+
+summary(rowCounts(movie_r))
+rowCounts(movie_r) %>%
+  data.frame(reviews_per_person = .) %>%
+  ggplot(aes(x = reviews_per_person)) + 
+    geom_histogram(aes(y = ..density..), binwidth = 20) +
+    scale_y_continuous(limits = c(0,.0125), 
+                       breaks = seq(0, .0125, by = 0.0025),
+                       labels = seq(0, .0125, by = 0.0025)) +
+    labs(title = 'Number of Ratings Per MovieLense Reviewer')
+#check distributions of the number of   ratings given per movie
+
+colCounts(movie_r) %>%
+  data.frame(movie_review_count = .) %>%
+  ggplot(aes(x = movie_review_count)) + 
+    geom_histogram(aes(y = ..density..), binwidth = 20) +
+    scale_y_continuous(limits = c(0,.0175)) +
+    labs(title = 'Number of Reviews Per MovieLense listed Movie')
+
+#average rating per user
+ summary(rowMeans(movie_r)) 
+ rowMeans(movie_r) %>%
+  data.frame(ratings_per_person = .) %>%
+  ggplot(aes(x = ratings_per_person)) + geom_bar(width = 0.75) +
+    labs(title = 'Average Movielense Ratings  per user Distribution')
+ 
+ #average rating per movie
+ summary(colMeans(movie_r)) 
+ colMeans(movie_r) %>%
+  data.frame(ratings_per_movie = .) %>%
+  ggplot(aes(x = ratings_per_movie)) + geom_bar(width = 0.75) +
+    labs(title = 'Average Movielense Ratings  per movie Distribution')
+
+```
+
+Here we also explored the genres info, not used for prediction. Need to process string of genres to be used
+
+```{r,eval=FALSE}
+movie_genre <- as.data.frame(mv_train$genres, stringsAsFactors=FALSE)
+
+movie_genre2 <- as.data.frame(tstrsplit(movie_genre[,1], '[|]', 
+                                   type.convert=TRUE), 
+                         stringsAsFactors=FALSE) 
+#dim(movie_genre2)
+colnames(movie_genre2) <- c(1:7)
+
+list_genre <- movie_genre2%>%select(1)%>%distinct()%>%pull()
+
+genre_mat1 <- matrix(0,71802,18)
+genre_mat1[1,] <- list_genre
+colnames(genre_mat1) <- list_genre
+
+for (index in 1:nrow(movie_genre2)) {
+  for (col in 1:ncol(movie_genre2)) {
+    gen_col = which(genre_mat1[1,] == movie_genre2[index,col]) #Author DataFlair
+    genre_mat1[index+1,gen_col] <- 1
+}
+}
+genre_mat2 <- as.data.frame(genre_mat1[-1,], stringsAsFactors=FALSE) #remove first row, which was the genre list
+for (col in 1:ncol(genre_mat2)) {
+  genre_mat2[,col] <- as.integer(genre_mat2[,col]) #convert from characters to integers
+} 
+str(genre_mat2)
+#keep movie id, title genre to construct the searchmatrix
+SearchMatrix <- cbind(mv_train[,1:2], genre_mat2[])
+
+```
+
+3. Train and validate machine learning models: 
+
+We would like to use collaborative Filtering, including user-based collaborative filtering and item-based collaborative filtering. We will slipt the data into a training set (80%) and a validation set (20%).
+
+```{r}
+
+items_to_keep <- 10
+rating_threshold <- 3
+good_threshold <- 4
+set.seed(1)
+model_train_scheme <- evaluationScheme(data = movie_r,
+                              method = "split",
+                         train = 0.8, # proportion of rows to train.
+                   given = items_to_keep, # shouldn't keep n rec. items > min(rowCounts(movie_r))
+                   goodRating = good_threshold, # for binary classifier analysis.
+                   k = 1)
+```
+We built a random model as a reference
+
+
+```{r}
+model0 <- getData(model_train_scheme, "train") %>% 
+  Recommender(method = "RANDOM")
+
+model0_pred <- predict(model0, getData(model_train_scheme, "known"), type = "ratings")
+model0_per <- calcPredictionAccuracy(model0_pred, getData(model_train_scheme, "unknown"), byUser = F)
+```
+
+
+
+First we would use user-based collaborative filtering
+
+```{r}
+model_params <- list(method = "cosine",
+                     nn = 10, # find each user's 10 most similar users.
+                     sample = FALSE, # already did this.
+                     normalize = "center")
+model1 <- getData(model_train_scheme, "train") %>% 
+  Recommender(method = "UBCF", parameter = model_params)
+
+model1_pred <- predict(model1, getData(model_train_scheme, "known"), type = "ratings")
+model1_per <- calcPredictionAccuracy(model1_pred, getData(model_train_scheme, "unknown"), byUser = F)
+```
+
+second model we used is the item-based collaborative filtering
+
+```{r}
+model_params <- list(method = "cosine",
+                     normalize = "center")
+model2 <- getData(model_train_scheme, "train") %>%
+  Recommender(method = "IBCF", parameter = model_params)
+
+model2_pred <- predict(model2, getData(model_train_scheme, "known"), type = "ratings")
+model2_per <- calcPredictionAccuracy(model2_pred, getData(model_train_scheme, "unknown"), byUser = F)
+```
+
+Third model we used is the SVD
+
+```{r}
+model_params <- list(normalize = "center")
+model3 <- getData(model_train_scheme, "train") %>% 
+  Recommender(method = "SVD",parameter = model_params)
+
+model3_pred <- predict(model3, getData(model_train_scheme, "known"), type = "ratings")
+model3_per <- calcPredictionAccuracy(model3_pred, getData(model_train_scheme, "unknown"), byUser = F)
+```
+
+```{r}
+#Fourth model is the SVDF (NOT USED)
+# model4 <- getData(model_train_scheme, "train") %>% 
+#   Recommender(method = "SVDF")
+# 
+# model4_pred <- predict(model4, getData(model_train_scheme, "known"), type = "ratings")
+# model4_per <- calcPredictionAccuracy(model4_pred, getData(model_train_scheme, "unknown"), byUser = F)
+```
+
+Now we can compare the models
+
+```{r}
+#random 
+model0_per
+#UBCF
+model1_per
+#IBCF
+model2_per
+#SVD
+model3_per
+#SVDF
+#model4_per
+```
+
+4. Model performance
+
+Here, we utilized information from users and their previous ratings to develop three different recommendation systems:1) user-based collaborative filtering (UBCF) where the users are in the focus of the recommendation system; 2)item-based collaborative filtering IBCF where the focus is on the movies. 3) recommender based on SVD approximation with column-mean imputation. We also used produce random recommendations as a reference. After checking the distribution in Q2, we decided to normalize the data to compensate for the skewness. We  slipted the data into a training set (80%) and a validation set (20%). And then build the models in the training set and evaluate the model performance in the validation set. The loss functions we used are RMSE, MSE and MAE. We found all three models performed much better than the random recommendation. Of these three, the SVD model performs best with RMSE of 0.96, MSE 0.93, and MAE 0.74. So,we decided to use SVD as the final model. 
+
+
+5. Apply the final model to produce movie rating predictions on the test data
+
+```{r,eval=FALSE}
+# your code here
+model_params <- list(normalize = "center")
+
+final_model<-
+  movie_r[1:nrow(movie_r)] %>% 
+  Recommender(method = "SVD", parameter = model_params)
+
+
+recom <- predict(final_model, movie_r[1:nrow(movie_r)], type = "ratingMatrix")
+recom_mat<-as(recom, "matrix")
+recom_da<-as.data.frame(recom_mat)
+
+rownames(recom_da)<-rownames(recom_mat)
+recom_da<-tibble::rownames_to_column(recom_da, "userId")
+
+
+head(recom_da)
+#convert to long format
+recom_dalong<-
+  recom_da%>%
+  pivot_longer(-userId,names_to = "movieId",values_to = "ratings")
+
+#impute test dataset
+test <- select(mv_test, movieId, userId)
+rating_predictions<-
+  test%>%
+  transmute(userId=as.character(userId),
+            movieId=as.character(movieId))%>%
+  left_join(recom_dalong,by=c("movieId","userId"))%>%
+  pull(ratings)
+
+saveRDS(rating_predictions, file = "rating_predictions.RDS")
+```
+
+
+
+
+
+
